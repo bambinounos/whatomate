@@ -617,24 +617,6 @@ func (m *Manager) completeTransferConnection(session *CallSession, transferID, a
 	agentRemote := session.AgentRemoteTrack
 	session.mu.Unlock()
 
-	// Incoming calls can deliver the caller's media track a beat after the agent
-	// answers (the WhatsApp leg's media starts around accept time), so callerRemote
-	// is sometimes still nil here. Starting the bridge now would leave the agent
-	// unable to hear the caller (one-way audio: caller hears agent, not vice
-	// versa). Wait briefly for the track that the peer's OnTrack handler stores
-	// on the session before bridging. Falls back to nil after the timeout, i.e.
-	// the prior behavior, so this never makes things worse.
-	if callerRemote == nil && session.Direction != models.CallDirectionOutgoing {
-		for i := 0; i < 50 && callerRemote == nil; i++ {
-			time.Sleep(40 * time.Millisecond)
-			session.mu.Lock()
-			callerRemote = session.CallerRemoteTrack
-			session.mu.Unlock()
-		}
-		m.log.Info("Waited for late caller track before bridge",
-			"transfer_id", transferID, "caller_remote_nil", callerRemote == nil)
-	}
-
 	bridge := m.setupAudioBridge(session)
 
 	// Seed the bridge so agent→caller RTP continues past hold music seq numbers.
