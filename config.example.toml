@@ -17,6 +17,7 @@ read_timeout = 30
 write_timeout = 30
 base_path = ""  # Set to "/subpath" if behind nginx proxy pass
 allowed_origins = ""  # Comma-separated CORS origins (e.g., "https://app.example.com,https://admin.example.com"). Empty = allow all (dev only).
+# well_known_dir = "/app/well-known"  # Serve files from this dir at /.well-known/ (e.g. assetlinks.json for an Android TWA wrapper). Empty = disabled.
 
 [database]
 host = "db"  # Use "localhost" for local development
@@ -130,6 +131,16 @@ udp_port_max = 10100          # WebRTC UDP port range end
 # urls = ["turn:your-turn-server.com:3478"]
 # secret = "your-coturn-static-auth-secret"
 # credential_ttl = 86400
+
+# Web Push (VAPID) — background notifications for the installed PWA/TWA
+# (Android phones with the app closed). Generate the key pair once with:
+#   whatomate vapid-keys
+# Rotating the keys invalidates every stored browser subscription.
+# [push]
+# enabled = true
+# vapid_public_key = ""
+# vapid_private_key = ""
+# subscriber = "mailto:you@example.com"
 
 # Default admin credentials (only used during initial setup when no users exist)
 [default_admin]

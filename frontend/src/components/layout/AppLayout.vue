@@ -14,6 +14,7 @@ import {
 } from 'lucide-vue-next'
 import { wsService } from '@/services/websocket'
 import { authService } from '@/services/api'
+import { initPush } from '@/services/push'
 import OrganizationSwitcher from './OrganizationSwitcher.vue'
 import UserMenu from './UserMenu.vue'
 import ActiveCallPanel from '@/components/calling/ActiveCallPanel.vue'
@@ -47,8 +48,14 @@ onMounted(() => {
     // new messages even when the Whatomate tab is backgrounded. If a browser
     // blocks the auto-request (needs a user gesture), Settings exposes an
     // explicit "Enable desktop notifications" button as a guaranteed path.
-    if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
-      Notification.requestPermission().catch(() => {})
+    // Once granted, also subscribe to Web Push so notifications reach the
+    // installed PWA/TWA even with the app fully closed.
+    if (typeof Notification !== 'undefined') {
+      if (Notification.permission === 'default') {
+        Notification.requestPermission().then(() => initPush()).catch(() => {})
+      } else if (Notification.permission === 'granted') {
+        initPush()
+      }
     }
   }
 })

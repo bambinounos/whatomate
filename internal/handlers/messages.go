@@ -536,6 +536,12 @@ func (a *App) broadcastNewMessage(orgID uuid.UUID, msg *models.Message, contact 
 		Type:    websocket.TypeNewMessage,
 		Payload: payload,
 	})
+
+	// Web Push for closed/backgrounded clients (installed PWA/TWA). The service
+	// worker suppresses it when a focused window is already showing the app.
+	if a.pushEnabled() && msg.Direction == models.DirectionIncoming {
+		a.sendNewMessagePush(orgID, contact, msg, profileName)
+	}
 }
 
 // broadcastReactionUpdate broadcasts a reaction update via WebSocket

@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { api } from '@/services/api'
+import { teardownPush } from '@/services/push'
 
 export interface UserSettings {
   email_notifications?: boolean
@@ -137,6 +138,10 @@ export const useAuthStore = defineStore('auth', () => {
 
   async function logout(): Promise<void> {
     try {
+      // Drop the Web Push subscription first, while the session cookie is
+      // still valid — otherwise this browser keeps getting notifications
+      // for an account it's no longer logged into.
+      await teardownPush()
       await api.post('/auth/logout', {})
     } catch {
       // Ignore logout errors

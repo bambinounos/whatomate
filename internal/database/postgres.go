@@ -115,6 +115,9 @@ func GetMigrationModels() []MigrationModel {
 		{"CallTransfer", &models.CallTransfer{}},
 		{"CallPermission", &models.CallPermission{}},
 		{"AuditLog", &models.AuditLog{}},
+
+		// Web Push (VAPID) subscriptions
+		{"PushSubscription", &models.PushSubscription{}},
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	webpush "github.com/SherClockHolmes/webpush-go"
 	"github.com/redis/go-redis/v9"
 	"github.com/shridarpatil/whatomate/internal/assignment"
 	"github.com/shridarpatil/whatomate/internal/calling"
@@ -47,6 +48,8 @@ func main() {
 		runWorker(os.Args[2:])
 	case "version":
 		fmt.Printf("Whatomate %s (built %s)\n", Version, BuildTime)
+	case "vapid-keys":
+		generateVAPIDKeys()
 	case "help", "-h", "--help":
 		printUsage()
 	default:
@@ -63,10 +66,11 @@ Usage:
   whatomate <command> [options]
 
 Commands:
-  server    Start the API server (with optional embedded workers)
-  worker    Start background workers only (no API server)
-  version   Show version information
-  help      Show this help message
+  server      Start the API server (with optional embedded workers)
+  worker      Start background workers only (no API server)
+  vapid-keys  Generate a VAPID key pair for Web Push notifications
+  version     Show version information
+  help        Show this help message
 
 Server Options:
   -config string    Path to config file (default "config.toml")
@@ -88,6 +92,22 @@ Deployment Scenarios:
   All-in-one:    whatomate server
   Separate:      whatomate server -workers 0  (on API server)
                  whatomate worker -workers 4  (on worker server)`)
+}
+
+// generateVAPIDKeys prints a fresh VAPID key pair as a ready-to-paste
+// config.toml block. Run once; rotating keys invalidates all subscriptions.
+func generateVAPIDKeys() {
+	privateKey, publicKey, err := webpush.GenerateVAPIDKeys()
+	if err != nil {
+		fmt.Printf("Failed to generate VAPID keys: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("# Add this to config.toml (set a real contact in subscriber):")
+	fmt.Println("[push]")
+	fmt.Println("enabled = true")
+	fmt.Printf("vapid_public_key = %q\n", publicKey)
+	fmt.Printf("vapid_private_key = %q\n", privateKey)
+	fmt.Println(`subscriber = "mailto:you@example.com"`)
 }
 
 // ============================================================================
@@ -755,6 +775,11 @@ func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger, basePa
 	g.DELETE("/api/canned-responses/{id}", app.DeleteCannedResponse)
 	g.POST("/api/canned-responses/{id}/use", app.IncrementCannedResponseUsage)
 
+	// Web Push (VAPID) subscriptions
+	g.GET("/api/push/vapid-key", app.GetVAPIDKey)
+	g.POST("/api/push/subscribe", app.SubscribePush)
+	g.DELETE("/api/push/subscribe", app.UnsubscribePush)
+
 	// Sessions (admin/debug)
 	g.GET("/api/chatbot/sessions", app.ListChatbotSessions)
 	g.GET("/api/chatbot/sessions/{id}", app.GetChatbotSession)
@@ -864,6 +889,14 @@ func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger, basePa
 	g.GET("/api/products/{id}", app.GetCatalogProduct)
 	g.PUT("/api/products/{id}", app.UpdateCatalogProduct)
 	g.DELETE("/api/products/{id}", app.DeleteCatalogProduct)
+
+	// Serve deployment-provided /.well-known files (e.g. assetlinks.json for
+	// an Android TWA wrapper). Opt-in via server.well_known_dir; must register
+	// before the SPA catch-all so the static route takes precedence.
+	if cfg.Server.WellKnownDir != "" {
+		lo.Info("Serving /.well-known files", "dir", cfg.Server.WellKnownDir)
+		g.GET("/.well-known/{file}", app.ServeWellKnownFile)
+	}
 
 	// Serve embedded frontend (SPA)
 	if frontend.IsEmbedded() {

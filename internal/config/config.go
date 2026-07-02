@@ -29,6 +29,17 @@ type Config struct {
 	Cookie       CookieConfig       `koanf:"cookie"`
 	Calling      CallingConfig      `koanf:"calling"`
 	TTS          TTSConfig          `koanf:"tts"`
+	Push         PushConfig         `koanf:"push"`
+}
+
+// PushConfig holds Web Push (VAPID) settings for background notifications.
+// Generate the key pair with the `whatomate vapid-keys` subcommand. Rotating
+// the keys invalidates every stored subscription, so keep them stable.
+type PushConfig struct {
+	Enabled         bool   `koanf:"enabled"`
+	VAPIDPublicKey  string `koanf:"vapid_public_key"`
+	VAPIDPrivateKey string `koanf:"vapid_private_key"`
+	Subscriber      string `koanf:"subscriber"` // mailto: contact sent to push services
 }
 
 type TTSConfig struct {
@@ -111,6 +122,7 @@ type ServerConfig struct {
 	WriteTimeout   int    `koanf:"write_timeout"`
 	BasePath       string `koanf:"base_path"`       // Base path for frontend (e.g., "/whatomate" for proxy pass)
 	AllowedOrigins string `koanf:"allowed_origins"` // Comma-separated list of allowed CORS origins
+	WellKnownDir   string `koanf:"well_known_dir"`  // Directory served at /.well-known/ (e.g. assetlinks.json for Android TWA); empty = disabled
 }
 
 type DatabaseConfig struct {

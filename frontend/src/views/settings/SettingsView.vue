@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { initPush } from '@/services/push'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -66,6 +67,9 @@ async function enableDesktopNotifications() {
   desktopPerm.value = await Notification.requestPermission()
   if (desktopPerm.value === 'granted') {
     new Notification('Whatomate', { body: t('settings.desktopNotificationsEnabled'), icon: '/favicon.svg' })
+    // Also subscribe this browser to Web Push (background notifications for
+    // the installed PWA/TWA). No-op if the server has push disabled.
+    initPush()
   }
 }
 
