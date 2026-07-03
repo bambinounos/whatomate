@@ -393,7 +393,7 @@
     "retrying": "Retrying",
     "failedTapRetry": "Failed - Tap to retry",
     "failedToSend": "Failed to send",
-    "unsupportedMessage": "This message type is not supported",
+    "unsupportedMessage": "Unsupported content (e.g., a view-once photo or video). Ask the customer to re-send it as a normal photo/video.",
     "photo": "Photo",
     "sticker": "Sticker",
     "message": "Message",

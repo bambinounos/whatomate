@@ -355,7 +355,7 @@
     "retrying": "Reintentando",
     "failedTapRetry": "Fallido - Toque para reintentar",
     "failedToSend": "Error al enviar",
-    "unsupportedMessage": "Este tipo de mensaje no es compatible",
+    "unsupportedMessage": "Contenido no compatible (p. ej., foto o video de una sola vista). Pídele al cliente que lo reenvíe como foto/video normal.",
     "photo": "Foto",
     "sticker": "Sticker",
     "message": "Mensaje",
