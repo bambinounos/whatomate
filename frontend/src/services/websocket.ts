@@ -122,6 +122,7 @@ class WebSocketService {
   private reconnectAttempts = 0
   private reconnectDelay = 1000
   private maxReconnectDelay = 30000
+  private reconnectTimer: number | null = null
   private intentionalClose = false
   private lifecycleListenersInstalled = false
   private pingInterval: number | null = null
@@ -213,6 +214,13 @@ class WebSocketService {
   disconnect() {
     this.stopPing()
     this.intentionalClose = true // Prevent reconnect (deliberate close, e.g. logout)
+    this.isConnecting = false
+    // Cancel any pending backoff: otherwise a timer scheduled before disconnect()
+    // still fires connect(), which resets intentionalClose = false and reopens.
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
     if (this.ws) {
       this.ws.close()
       this.ws = null
@@ -584,8 +592,23 @@ class WebSocketService {
     }
   }
 
+  // Reconnection must not outlive the session: logout is a client-side nav, so
+  // this singleton and its backoff timer survive it. Without this gate, once the
+  // socket closes post-logout the token fetch returns null (401) and — with the
+  // uncapped retry — reschedules forever, polling the WS-token endpoint on a 401
+  // loop. isAuthenticated() distinguishes "session gone" (stop) from a transient
+  // token-fetch failure while still logged in (keep retrying). Guarded because
+  // this may run before Pinia is ready; treat "unknown" as unauthenticated.
+  private isAuthenticated(): boolean {
+    try {
+      return useAuthStore().isAuthenticated
+    } catch {
+      return false
+    }
+  }
+
   private handleReconnect() {
-    if (this.intentionalClose) {
+    if (this.intentionalClose || !this.isAuthenticated()) {
       return
     }
 
@@ -598,7 +621,13 @@ class WebSocketService {
       this.maxReconnectDelay
     )
 
-    setTimeout(() => {
+    // Track the pending timer so disconnect() can cancel it; clear any prior one
+    // so overlapping triggers can't stack multiple backoff chains.
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer)
+    }
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null
       this.connect()
     }, delay)
   }
@@ -613,7 +642,7 @@ class WebSocketService {
     this.lifecycleListenersInstalled = true
 
     const reconnectIfDead = () => {
-      if (this.intentionalClose) {
+      if (this.intentionalClose || !this.isAuthenticated()) {
         return
       }
       const state = this.ws?.readyState

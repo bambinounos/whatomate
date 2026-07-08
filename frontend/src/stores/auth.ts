@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { api } from '@/services/api'
 import { teardownPush } from '@/services/push'
+import { wsService } from '@/services/websocket'
 
 export interface UserSettings {
   email_notifications?: boolean
@@ -58,6 +59,11 @@ export const useAuthStore = defineStore('auth', () => {
 
   function clearAuth() {
     user.value = null
+
+    // Tear the WebSocket down on any auth clear (logout or invalid session).
+    // Logout is a client-side nav, so the singleton wsService and its backoff
+    // timer would otherwise survive and reconnect-loop against a 401 forever.
+    wsService.disconnect()
 
     // Clean up localStorage (including legacy token keys)
     localStorage.removeItem('user')
