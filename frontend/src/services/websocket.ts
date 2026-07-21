@@ -43,13 +43,36 @@ function showNotification(title: string, body: string, contactId: string) {
 
 // Show a real OS-level desktop notification (Web Notification API). Fires only
 // when permission is granted and the Whatomate tab/window is NOT focused, so an
-// agent working in another app/window still gets alerted. No service worker is
-// registered, so we use the Notification constructor directly. Falls back
-// silently when unsupported, denied, or the tab is already focused.
+// agent working in another app/window still gets alerted. When a service worker
+// registration exists (Web Push), we go through registration.showNotification():
+// the plain Notification constructor ALWAYS throws on Android browsers (Chrome
+// 42+, "Illegal constructor"), so without this path a phone browser shows
+// nothing at all; the SW path also routes clicks through the worker's
+// notificationclick handler and persists the notification in the OS shade.
+// Falls back to the constructor when there's no registration (push disabled)
+// or the SW call fails, and silently when unsupported, denied, or the tab is
+// already focused.
 let activeNotification: Notification | null = null
-function showDesktopNotification(title: string, body: string, contactId: string) {
+async function showDesktopNotification(title: string, body: string, contactId: string) {
   if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return
   if (document.visibilityState === 'visible' && document.hasFocus()) return
+
+  try {
+    const reg = await navigator.serviceWorker?.getRegistration()
+    if (reg) {
+      await reg.showNotification(title, {
+        body,
+        icon: 'icons/icon-192.png',
+        badge: 'icons/badge-72.png',
+        tag: `chat-${contactId}`,
+        data: { url: `./chat/${contactId}` }
+      })
+      return
+    }
+  } catch {
+    // SW path unavailable or failed — fall through to the constructor.
+  }
+
   try {
     activeNotification?.close()
     const n = new Notification(title, { body, icon: '/favicon.svg', tag: `chat-${contactId}` })
