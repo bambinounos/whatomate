@@ -12,6 +12,7 @@ import { useTagsStore } from '@/stores/tags'
 import { TagBadge } from '@/components/ui/tag-badge'
 import { getTagColorClass } from '@/lib/constants'
 import { getErrorMessage } from '@/lib/api-utils'
+import { compressImage } from '@/lib/imageCompression'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
@@ -144,13 +145,27 @@ const selectedAccount = ref<string | null>(null)
 const contactAccounts = ref<string[]>([])
 const orgAccounts = ref<any[]>([])
 
-// File upload state
+// File upload state — a queue so drag/drop, picker and paste can batch multiple
+// files. Each item holds an already-compressed + already-validated File.
+interface QueuedMedia {
+  id: string
+  file: File
+  previewUrl: string | null // object URL for image/video only
+  caption: string
+  type: 'image' | 'video' | 'audio' | 'document'
+}
 const fileInputRef = ref<HTMLInputElement | null>(null)
-const selectedFile = ref<File | null>(null)
-const filePreviewUrl = ref<string | null>(null)
 const isMediaDialogOpen = ref(false)
-const mediaCaption = ref('')
 const isUploadingMedia = ref(false)
+const mediaQueue = ref<QueuedMedia[]>([])
+const activeMediaId = ref<string | null>(null)
+const isCompressing = ref(false)
+const sendProgress = ref<{ current: number; total: number } | null>(null)
+const activeMedia = computed(() => mediaQueue.value.find(m => m.id === activeMediaId.value) ?? null)
+const activeCaption = computed({
+  get: () => activeMedia.value?.caption ?? '',
+  set: (v: string) => { if (activeMedia.value) activeMedia.value.caption = v },
+})
 
 // In-app media viewer (lightbox) state — see MediaViewerDialog.vue
 const mediaViewerOpen = ref(false)
@@ -1648,48 +1663,73 @@ function openFilePicker() {
   fileInputRef.value?.click()
 }
 
-// Shared core: validate + build preview + open the media modal. Used by the file
-// picker, drag-and-drop, and paste so all three reuse the same send pipeline.
-function openFileForPreview(file: File) {
-  // Validate file type
-  const allowedTypes = ['image/', 'video/', 'audio/', 'application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument']
-  const isAllowed = allowedTypes.some(type => file.type.startsWith(type))
-  if (!isAllowed) {
-    toast.error(t('chat.unsupportedFileType'), {
-      description: t('chat.unsupportedFileTypeDesc')
-    })
-    return
-  }
+const ALLOWED_MEDIA_TYPES = ['image/', 'video/', 'audio/', 'application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument']
+function isAllowedMediaType(file: File): boolean {
+  return ALLOWED_MEDIA_TYPES.some(type => file.type.startsWith(type))
+}
 
-  // Validate file size (16MB limit for WhatsApp)
-  const maxSize = 16 * 1024 * 1024
-  if (file.size > maxSize) {
-    toast.error(t('chat.fileTooLarge'), {
-      description: t('chat.fileTooLargeDesc')
-    })
-    return
-  }
+// Per-type client size cap, applied AFTER compression. Images: Meta's hard 5 MB
+// image limit. Others: the backend's 15 MB fasthttp request cap minus multipart
+// overhead (raising the document limit would need a backend change).
+function mediaSizeLimit(type: string): number {
+  return type === 'image' ? 5 * 1024 * 1024 : 14.5 * 1024 * 1024
+}
 
-  selectedFile.value = file
-  mediaCaption.value = ''
-
-  // Create preview URL for images and videos
-  if (file.type.startsWith('image/') || file.type.startsWith('video/')) {
-    filePreviewUrl.value = URL.createObjectURL(file)
-  } else {
-    filePreviewUrl.value = null
-  }
+// Shared core: validate, compress images, and add files to the send queue. Used
+// by the file picker, drag-and-drop and paste so all three batch the same way.
+async function enqueueFiles(files: File[]) {
+  if (isUploadingMedia.value) return // don't mutate the queue mid-send
+  const accepted = files.filter(f => {
+    if (isAllowedMediaType(f)) return true
+    toast.error(t('chat.unsupportedFileType'), { description: t('chat.unsupportedFileTypeDesc') })
+    return false
+  })
+  if (!accepted.length) return
 
   isMediaDialogOpen.value = true
+  isCompressing.value = true
+  try {
+    for (const raw of accepted) {
+      // Sequential (not parallel) to bound peak memory when decoding big images.
+      let file = raw
+      if (raw.type.startsWith('image/')) {
+        try {
+          file = await compressImage(raw)
+        } catch {
+          file = raw
+        }
+      }
+      const type = getMediaType(file.type) as QueuedMedia['type']
+      if (file.size > mediaSizeLimit(type)) {
+        toast.error(t('chat.fileTooLarge'), {
+          description: type === 'image' ? t('chat.fileTooLargeImage') : t('chat.fileTooLargeMedia'),
+        })
+        continue
+      }
+      const previewable = type === 'image' || type === 'video'
+      mediaQueue.value.push({
+        id: crypto.randomUUID(),
+        file,
+        previewUrl: previewable ? URL.createObjectURL(file) : null,
+        caption: '',
+        type,
+      })
+    }
+  } finally {
+    isCompressing.value = false
+    if (!mediaQueue.value.length) {
+      isMediaDialogOpen.value = false // everything got rejected
+    } else if (!activeMediaId.value || !mediaQueue.value.some(m => m.id === activeMediaId.value)) {
+      activeMediaId.value = mediaQueue.value[0].id
+    }
+  }
 }
 
 function handleFileSelect(event: Event) {
   const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  if (!file) return
-  openFileForPreview(file)
-  // Reset input so the same file can be selected again
-  input.value = ''
+  const files = Array.from(input.files ?? [])
+  input.value = '' // reset so the same file(s) can be selected again
+  if (files.length) enqueueFiles(files)
 }
 
 // Drag-and-drop a file onto the open conversation pane.
@@ -1712,34 +1752,48 @@ function onDrop(event: DragEvent) {
   isDragging.value = false
   dragDepth = 0
   if (!contactsStore.currentContact) return
-  const file = event.dataTransfer?.files?.[0]
-  if (file) openFileForPreview(file)
+  const files = Array.from(event.dataTransfer?.files ?? [])
+  if (files.length) enqueueFiles(files)
 }
 
-// Paste (Ctrl+V) an image/file into the composer (e.g. a screenshot).
+// Paste (Ctrl+V) image(s)/file(s) into the composer (e.g. a screenshot).
 function handlePaste(event: ClipboardEvent) {
   const items = event.clipboardData?.items
   if (!items) return
+  const files: File[] = []
   for (let i = 0; i < items.length; i++) {
     if (items[i].kind === 'file') {
-      const file = items[i].getAsFile()
-      if (file) {
-        event.preventDefault()
-        openFileForPreview(file)
-        return
-      }
+      const f = items[i].getAsFile()
+      if (f) files.push(f)
     }
+  }
+  if (files.length) {
+    event.preventDefault()
+    enqueueFiles(files)
+  }
+}
+
+function revokeMediaPreviews() {
+  for (const m of mediaQueue.value) {
+    if (m.previewUrl) URL.revokeObjectURL(m.previewUrl)
   }
 }
 
 function closeMediaDialog() {
   isMediaDialogOpen.value = false
-  if (filePreviewUrl.value) {
-    URL.revokeObjectURL(filePreviewUrl.value)
-    filePreviewUrl.value = null
-  }
-  selectedFile.value = null
-  mediaCaption.value = ''
+  revokeMediaPreviews()
+  mediaQueue.value = []
+  activeMediaId.value = null
+  sendProgress.value = null
+}
+
+function removeMedia(id: string) {
+  const idx = mediaQueue.value.findIndex(m => m.id === id)
+  if (idx === -1) return
+  const [removed] = mediaQueue.value.splice(idx, 1)
+  if (removed.previewUrl) URL.revokeObjectURL(removed.previewUrl)
+  if (activeMediaId.value === id) activeMediaId.value = mediaQueue.value[0]?.id ?? null
+  if (!mediaQueue.value.length) closeMediaDialog()
 }
 
 function getMediaType(mimeType: string): string {
@@ -1749,51 +1803,74 @@ function getMediaType(mimeType: string): string {
   return 'document'
 }
 
-async function sendMediaMessage() {
-  if (!selectedFile.value || !contactsStore.currentContact) return
+// Upload one queued file. Each media is its own WhatsApp message (the Cloud API
+// has no album/multi-media send), so the batch is N of these calls.
+async function sendOneMedia(item: QueuedMedia) {
+  const formData = new FormData()
+  formData.append('file', item.file)
+  formData.append('contact_id', contactsStore.currentContact!.id)
+  formData.append('type', item.type)
+  if (item.caption.trim()) {
+    formData.append('caption', item.caption.trim())
+  }
+  if (selectedAccount.value) {
+    formData.append('whatsapp_account', selectedAccount.value)
+  }
+
+  const basePath = ((window as any).__BASE_PATH__ ?? '').replace(/\/$/, '')
+  const response = await fetch(`${basePath}/api/messages/media`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: getRequestHeaders({ csrf: true }),
+    body: formData
+  })
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}))
+    throw new Error(error.message || 'Failed to send media')
+  }
+
+  const result = await response.json()
+  // addMessage has duplicate checking for WebSocket
+  if (result.data) {
+    contactsStore.addMessage(result.data)
+    scrollToBottom()
+  }
+}
+
+async function sendAllMedia() {
+  if (!mediaQueue.value.length || !contactsStore.currentContact) return
 
   isUploadingMedia.value = true
-  try {
-    const formData = new FormData()
-    formData.append('file', selectedFile.value)
-    formData.append('contact_id', contactsStore.currentContact.id)
-    formData.append('type', getMediaType(selectedFile.value.type))
-    if (mediaCaption.value.trim()) {
-      formData.append('caption', mediaCaption.value.trim())
+  const total = mediaQueue.value.length
+  const failed: QueuedMedia[] = []
+  let done = 0
+  // Snapshot: we splice sent items out of the reactive array as we go.
+  for (const item of [...mediaQueue.value]) {
+    done++
+    sendProgress.value = { current: done, total }
+    try {
+      await sendOneMedia(item)
+      const i = mediaQueue.value.findIndex(m => m.id === item.id)
+      if (i !== -1) {
+        if (item.previewUrl) URL.revokeObjectURL(item.previewUrl)
+        mediaQueue.value.splice(i, 1)
+      }
+    } catch {
+      failed.push(item) // continue-on-error: keep failed items queued for retry
     }
-    if (selectedAccount.value) {
-      formData.append('whatsapp_account', selectedAccount.value)
-    }
+  }
+  sendProgress.value = null
+  isUploadingMedia.value = false
 
-    const basePath = ((window as any).__BASE_PATH__ ?? '').replace(/\/$/, '')
-    const response = await fetch(`${basePath}/api/messages/media`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: getRequestHeaders({ csrf: true }),
-      body: formData
-    })
-
-    if (!response.ok) {
-      const error = await response.json()
-      throw new Error(error.message || 'Failed to send media')
-    }
-
-    const result = await response.json()
-
-    // Add the message to the store (addMessage has duplicate checking for WebSocket)
-    if (result.data) {
-      contactsStore.addMessage(result.data)
-      scrollToBottom()
-    }
-
+  if (!failed.length) {
     toast.success(t('chat.mediaSent'))
     closeMediaDialog()
-  } catch (error: any) {
-    toast.error(t('chat.mediaFailed'), {
-      description: error.message || t('chat.mediaFailedDesc')
+  } else {
+    toast.error(t('chat.someMediaFailed', { count: failed.length }), {
+      description: t('chat.mediaFailedDesc')
     })
-  } finally {
-    isUploadingMedia.value = false
+    activeMediaId.value = mediaQueue.value[0]?.id ?? null
   }
 }
 </script>
@@ -2690,6 +2767,7 @@ async function sendMediaMessage() {
             <input
               ref="fileInputRef"
               type="file"
+              multiple
               accept="image/*,video/*,audio/*,.pdf,.doc,.docx"
               class="hidden"
               @change="handleFileSelect"
@@ -2959,67 +3037,101 @@ async function sendMediaMessage() {
       </DialogContent>
     </Dialog>
 
-    <!-- Media Preview Dialog -->
-    <Dialog v-model:open="isMediaDialogOpen">
+    <!-- Media Preview Dialog (batch) -->
+    <Dialog :open="isMediaDialogOpen" @update:open="(v) => { if (!v) closeMediaDialog() }">
       <DialogContent class="max-w-md">
         <DialogHeader>
-          <DialogTitle>{{ $t('chat.sendMedia') }}</DialogTitle>
+          <DialogTitle>
+            {{ mediaQueue.length > 1 ? $t('chat.sendNFiles', { count: mediaQueue.length }) : $t('chat.sendMedia') }}
+          </DialogTitle>
           <DialogDescription>
-            {{ selectedFile?.name }}
+            {{ activeMedia?.file.name }}
           </DialogDescription>
         </DialogHeader>
-        <div class="py-4 space-y-4">
+
+        <!-- Compressing placeholder (before items land) -->
+        <div v-if="isCompressing && !mediaQueue.length" class="py-10 flex flex-col items-center gap-3 text-muted-foreground">
+          <Loader2 class="h-8 w-8 animate-spin" />
+          <span class="text-sm">{{ $t('chat.compressing') }}</span>
+        </div>
+
+        <div v-else-if="activeMedia" class="py-4 space-y-4">
           <!-- Image preview -->
-          <div v-if="selectedFile?.type.startsWith('image/') && filePreviewUrl" class="flex justify-center">
+          <div v-if="activeMedia.type === 'image' && activeMedia.previewUrl" class="flex justify-center">
             <img
-              :src="filePreviewUrl"
-              :alt="selectedFile.name"
+              :src="activeMedia.previewUrl"
+              :alt="activeMedia.file.name"
               class="max-w-full max-h-[300px] rounded-lg object-contain"
             />
           </div>
           <!-- Video preview -->
-          <div v-else-if="selectedFile?.type.startsWith('video/') && filePreviewUrl" class="flex justify-center">
+          <div v-else-if="activeMedia.type === 'video' && activeMedia.previewUrl" class="flex justify-center">
             <video
-              :src="filePreviewUrl"
+              :src="activeMedia.previewUrl"
               controls
               class="max-w-full max-h-[300px] rounded-lg"
             />
           </div>
           <!-- Audio preview -->
-          <div v-else-if="selectedFile?.type.startsWith('audio/')" class="flex justify-center">
+          <div v-else-if="activeMedia.type === 'audio'" class="flex justify-center">
             <div class="flex items-center gap-3 px-4 py-3 bg-muted rounded-lg">
               <div class="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center">
                 <Paperclip class="h-5 w-5 text-primary" />
               </div>
               <div>
-                <p class="font-medium text-sm">{{ selectedFile.name }}</p>
+                <p class="font-medium text-sm">{{ activeMedia.file.name }}</p>
                 <p class="text-xs text-muted-foreground">{{ $t('chat.audioFile') }}</p>
               </div>
             </div>
           </div>
           <!-- Document preview -->
-          <div v-else-if="selectedFile" class="flex justify-center">
+          <div v-else class="flex justify-center">
             <div class="flex items-center gap-3 px-4 py-3 bg-muted rounded-lg">
               <div class="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center">
                 <FileText class="h-5 w-5 text-primary" />
               </div>
               <div>
-                <p class="font-medium text-sm truncate max-w-[200px]">{{ selectedFile.name }}</p>
+                <p class="font-medium text-sm truncate max-w-[200px]">{{ activeMedia.file.name }}</p>
                 <p class="text-xs text-muted-foreground">
-                  {{ (selectedFile.size / 1024).toFixed(1) }} KB
+                  {{ (activeMedia.file.size / 1024).toFixed(1) }} KB
                 </p>
               </div>
             </div>
           </div>
 
-          <!-- Caption input (not for audio) -->
-          <div v-if="selectedFile && !selectedFile.type.startsWith('audio/')">
+          <!-- Caption input (per file, not for audio) -->
+          <div v-if="activeMedia.type !== 'audio'">
             <Textarea
-              v-model="mediaCaption"
+              v-model="activeCaption"
               :placeholder="$t('chat.mediaCaption') + '...'"
               class="min-h-[60px] max-h-[100px] resize-none"
               :rows="2"
             />
+          </div>
+
+          <!-- Thumbnail strip (when more than one file queued) -->
+          <div v-if="mediaQueue.length > 1" class="flex gap-2 overflow-x-auto pb-1">
+            <div
+              v-for="m in mediaQueue"
+              :key="m.id"
+              class="relative shrink-0 h-14 w-14 rounded-md overflow-hidden border cursor-pointer transition"
+              :class="m.id === activeMediaId ? 'ring-2 ring-primary border-primary' : 'border-border opacity-70 hover:opacity-100'"
+              @click="activeMediaId = m.id"
+            >
+              <img v-if="m.type === 'image' && m.previewUrl" :src="m.previewUrl" class="h-full w-full object-cover" />
+              <div v-else class="h-full w-full flex items-center justify-center bg-muted">
+                <FileText class="h-5 w-5 text-muted-foreground" />
+              </div>
+              <button
+                type="button"
+                class="absolute -top-1 -right-1 h-5 w-5 rounded-full bg-black/70 text-white flex items-center justify-center hover:bg-black disabled:opacity-50"
+                :aria-label="$t('chat.removeMedia')"
+                :disabled="isUploadingMedia"
+                @click.stop="removeMedia(m.id)"
+              >
+                <X class="h-3 w-3" />
+              </button>
+            </div>
           </div>
 
           <!-- Actions -->
@@ -3027,9 +3139,11 @@ async function sendMediaMessage() {
             <Button variant="outline" @click="closeMediaDialog" :disabled="isUploadingMedia">
               {{ $t('common.cancel') }}
             </Button>
-            <Button @click="sendMediaMessage" :disabled="isUploadingMedia">
+            <Button @click="sendAllMedia" :disabled="isUploadingMedia || isCompressing || !mediaQueue.length">
               <Send v-if="!isUploadingMedia" class="mr-2 h-4 w-4" />
-              <span v-if="isUploadingMedia">{{ $t('chat.sending') }}...</span>
+              <span v-if="sendProgress">{{ $t('chat.sendingProgress', { current: sendProgress.current, total: sendProgress.total }) }}</span>
+              <span v-else-if="isUploadingMedia">{{ $t('chat.sending') }}...</span>
+              <span v-else-if="mediaQueue.length > 1">{{ $t('chat.sendN', { count: mediaQueue.length }) }}</span>
               <span v-else>{{ $t('chat.send') }}</span>
             </Button>
           </div>
