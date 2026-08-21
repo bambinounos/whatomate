@@ -122,7 +122,8 @@ type ServerConfig struct {
 	WriteTimeout   int    `koanf:"write_timeout"`
 	BasePath       string `koanf:"base_path"`       // Base path for frontend (e.g., "/whatomate" for proxy pass)
 	AllowedOrigins string `koanf:"allowed_origins"` // Comma-separated list of allowed CORS origins
-	WellKnownDir   string `koanf:"well_known_dir"`  // Directory served at /.well-known/ (e.g. assetlinks.json for Android TWA); empty = disabled
+	WellKnownDir     string `koanf:"well_known_dir"`     // Directory served at /.well-known/ (e.g. assetlinks.json for Android TWA); empty = disabled
+	MaxRequestBodyMB int    `koanf:"max_request_body_mb"` // Max HTTP request body size in MB (defaults to 105 MB to support WhatsApp 100 MB documents)
 }
 
 type DatabaseConfig struct {

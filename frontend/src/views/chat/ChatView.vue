@@ -13,6 +13,7 @@ import { TagBadge } from '@/components/ui/tag-badge'
 import { getTagColorClass } from '@/lib/constants'
 import { getErrorMessage } from '@/lib/api-utils'
 import { compressImage } from '@/lib/imageCompression'
+import { canOptimizeVideo, compressVideo } from '@/lib/videoCompression'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
@@ -90,7 +91,10 @@ import {
   Filter,
   StickyNote,
   ArrowLeft,
-  Forward
+  Forward,
+  Info,
+  Film,
+  Sparkles
 } from 'lucide-vue-next'
 import { getInitials, getAvatarGradient } from '@/lib/utils'
 import { useColorMode } from '@/composables/useColorMode'
@@ -106,7 +110,6 @@ import { useNotesStore } from '@/stores/notes'
 import { useHeaderMedia } from '@/composables/useHeaderMedia'
 import { CreateContactDialog } from '@/components/shared'
 import HeaderMediaUpload from '@/components/shared/HeaderMediaUpload.vue'
-import { Info } from 'lucide-vue-next'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -1678,11 +1681,47 @@ function isAllowedMediaType(file: File): boolean {
   return ALLOWED_MEDIA_TYPES.some(type => file.type.startsWith(type))
 }
 
-// Per-type client size cap, applied AFTER compression. Images: Meta's hard 5 MB
-// image limit. Others: the backend's 15 MB fasthttp request cap minus multipart
-// overhead (raising the document limit would need a backend change).
+// Per-type client size cap, applied AFTER compression:
+// - Images: Meta's hard 5 MB limit (downscaled/recompressed to <4.5 MB by imageCompression.ts).
+// - Audio / Inline Video: Meta's hard 16 MB limit (15.5 MB safety threshold).
+// - Documents (including large videos sent as document): Meta's official 100 MB limit.
 function mediaSizeLimit(type: string): number {
-  return type === 'image' ? 5 * 1024 * 1024 : 14.5 * 1024 * 1024
+  switch (type) {
+    case 'image':
+      return 5 * 1024 * 1024
+    case 'audio':
+    case 'video':
+      return 15.5 * 1024 * 1024
+    default:
+      return 100 * 1024 * 1024
+  }
+}
+
+const isOptimizingVideo = ref(false)
+
+async function handleOptimizeVideo(item: QueuedMedia) {
+  if (isOptimizingVideo.value) return
+  isOptimizingVideo.value = true
+  try {
+    const compressed = await compressVideo(item.file)
+    if (compressed.size < item.file.size) {
+      if (item.previewUrl) URL.revokeObjectURL(item.previewUrl)
+      item.file = compressed
+      item.previewUrl = URL.createObjectURL(compressed)
+      if (compressed.size <= 15.5 * 1024 * 1024) {
+        item.type = 'video'
+        toast.success(t('chat.videoOptimizedSuccess'))
+      } else {
+        toast.info(t('chat.videoOptimizedAsDocument'))
+      }
+    } else {
+      toast.info(t('chat.videoCannotCompressFurther'))
+    }
+  } catch {
+    toast.error(t('chat.videoOptimizeFailed'))
+  } finally {
+    isOptimizingVideo.value = false
+  }
 }
 
 // Shared core: validate, compress images, and add files to the send queue. Used
@@ -1709,14 +1748,27 @@ async function enqueueFiles(files: File[]) {
           file = raw
         }
       }
-      const type = getMediaType(file.type) as QueuedMedia['type']
-      if (file.size > mediaSizeLimit(type)) {
+      let type = getMediaType(file.type) as QueuedMedia['type']
+
+      // Meta WhatsApp Cloud API limits native inline videos to 16 MB.
+      // If a video is > 15.5 MB (and up to 100 MB), automatically enqueue it as
+      // 'document' so it sends reliably with original quality.
+      if (type === 'video' && file.size > 15.5 * 1024 * 1024) {
+        if (file.size <= 100 * 1024 * 1024) {
+          type = 'document'
+        }
+      }
+
+      const limit = type === 'document' ? 100 * 1024 * 1024 : mediaSizeLimit(type)
+      if (file.size > limit) {
         toast.error(t('chat.fileTooLarge'), {
-          description: type === 'image' ? t('chat.fileTooLargeImage') : t('chat.fileTooLargeMedia'),
+          description: file.size > 100 * 1024 * 1024
+            ? t('chat.fileTooLarge100MB')
+            : (type === 'image' ? t('chat.fileTooLargeImage') : t('chat.fileTooLargeMedia')),
         })
         continue
       }
-      const previewable = type === 'image' || type === 'video'
+      const previewable = file.type.startsWith('image/') || file.type.startsWith('video/')
       mediaQueue.value.push({
         id: crypto.randomUUID(),
         file,
@@ -3095,8 +3147,8 @@ async function sendAllMedia() {
               class="max-w-full max-h-[300px] rounded-lg object-contain"
             />
           </div>
-          <!-- Video preview -->
-          <div v-else-if="activeMedia.type === 'video' && activeMedia.previewUrl" class="flex justify-center">
+          <!-- Video preview (rendered for video files regardless of in-chat or document mode) -->
+          <div v-else-if="activeMedia.file.type.startsWith('video/') && activeMedia.previewUrl" class="flex justify-center">
             <video
               :src="activeMedia.previewUrl"
               controls
@@ -3124,10 +3176,67 @@ async function sendAllMedia() {
               <div>
                 <p class="font-medium text-sm truncate max-w-[200px]">{{ activeMedia.file.name }}</p>
                 <p class="text-xs text-muted-foreground">
-                  {{ (activeMedia.file.size / 1024).toFixed(1) }} KB
+                  {{ activeMedia.file.size >= 1024 * 1024 ? (activeMedia.file.size / (1024 * 1024)).toFixed(1) + ' MB' : (activeMedia.file.size / 1024).toFixed(1) + ' KB' }}
                 </p>
               </div>
             </div>
+          </div>
+
+          <!-- Video Mode Selector & Controls (when active file is a video) -->
+          <div v-if="activeMedia.file.type.startsWith('video/')" class="space-y-2">
+            <div class="flex items-center justify-between gap-2 p-2 bg-muted/60 rounded-lg text-xs">
+              <span class="text-muted-foreground font-medium">{{ $t('chat.videoMode') }}:</span>
+              <div class="flex items-center gap-1.5">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  class="h-7 px-2.5 text-xs rounded-md"
+                  :class="activeMedia.type === 'video' ? 'bg-primary/20 text-primary font-medium' : 'text-muted-foreground'"
+                  :disabled="activeMedia.file.size > 15.5 * 1024 * 1024"
+                  :title="activeMedia.file.size > 15.5 * 1024 * 1024 ? $t('chat.videoTooLargeForChat') : ''"
+                  @click="activeMedia.type = 'video'"
+                >
+                  <Film class="h-3.5 w-3.5 mr-1" />
+                  {{ $t('chat.videoAsVideo') }}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  class="h-7 px-2.5 text-xs rounded-md"
+                  :class="activeMedia.type === 'document' ? 'bg-primary/20 text-primary font-medium' : 'text-muted-foreground'"
+                  @click="activeMedia.type = 'document'"
+                >
+                  <FileText class="h-3.5 w-3.5 mr-1" />
+                  {{ $t('chat.videoAsDocument') }}
+                </Button>
+              </div>
+            </div>
+
+            <!-- Notice when video > 16 MB is routed to document -->
+            <div
+              v-if="activeMedia.file.size > 15.5 * 1024 * 1024 && activeMedia.type === 'document'"
+              class="text-xs text-amber-400/90 bg-amber-500/10 border border-amber-500/20 rounded-md p-2 flex items-start gap-2"
+            >
+              <Info class="h-4 w-4 shrink-0 mt-0.5" />
+              <span>{{ $t('chat.videoTooLargeForChat') }}</span>
+            </div>
+
+            <!-- Optional client-side video optimizer -->
+            <Button
+              v-if="canOptimizeVideo(activeMedia.file) && activeMedia.file.size > 15.5 * 1024 * 1024"
+              type="button"
+              variant="outline"
+              size="sm"
+              class="w-full text-xs h-8 border-dashed"
+              :disabled="isOptimizingVideo"
+              @click="handleOptimizeVideo(activeMedia)"
+            >
+              <Loader2 v-if="isOptimizingVideo" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
+              <Sparkles v-else class="mr-1.5 h-3.5 w-3.5 text-primary" />
+              {{ isOptimizingVideo ? $t('chat.optimizingVideo') : $t('chat.optimizeVideo') }}
+            </Button>
           </div>
 
           <!-- Caption input (per file, not for audio) -->
@@ -3150,6 +3259,7 @@ async function sendAllMedia() {
               @click="activeMediaId = m.id"
             >
               <img v-if="m.type === 'image' && m.previewUrl" :src="m.previewUrl" class="h-full w-full object-cover" />
+              <video v-else-if="m.file.type.startsWith('video/') && m.previewUrl" :src="m.previewUrl" class="h-full w-full object-cover pointer-events-none" />
               <div v-else class="h-full w-full flex items-center justify-center bg-muted">
                 <FileText class="h-5 w-5 text-muted-foreground" />
               </div>
