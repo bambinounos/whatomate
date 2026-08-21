@@ -13,7 +13,6 @@ import { TagBadge } from '@/components/ui/tag-badge'
 import { getTagColorClass } from '@/lib/constants'
 import { getErrorMessage } from '@/lib/api-utils'
 import { compressImage } from '@/lib/imageCompression'
-import { canOptimizeVideo, compressVideo } from '@/lib/videoCompression'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
@@ -93,8 +92,7 @@ import {
   ArrowLeft,
   Forward,
   Info,
-  Film,
-  Sparkles
+  Film
 } from 'lucide-vue-next'
 import { getInitials, getAvatarGradient } from '@/lib/utils'
 import { useColorMode } from '@/composables/useColorMode'
@@ -1697,33 +1695,6 @@ function mediaSizeLimit(type: string): number {
   }
 }
 
-const isOptimizingVideo = ref(false)
-
-async function handleOptimizeVideo(item: QueuedMedia) {
-  if (isOptimizingVideo.value) return
-  isOptimizingVideo.value = true
-  try {
-    const compressed = await compressVideo(item.file)
-    if (compressed.size < item.file.size) {
-      if (item.previewUrl) URL.revokeObjectURL(item.previewUrl)
-      item.file = compressed
-      item.previewUrl = URL.createObjectURL(compressed)
-      if (compressed.size <= 15.5 * 1024 * 1024) {
-        item.type = 'video'
-        toast.success(t('chat.videoOptimizedSuccess'))
-      } else {
-        toast.info(t('chat.videoOptimizedAsDocument'))
-      }
-    } else {
-      toast.info(t('chat.videoCannotCompressFurther'))
-    }
-  } catch {
-    toast.error(t('chat.videoOptimizeFailed'))
-  } finally {
-    isOptimizingVideo.value = false
-  }
-}
-
 // Shared core: validate, compress images, and add files to the send queue. Used
 // by the file picker, drag-and-drop and paste so all three batch the same way.
 async function enqueueFiles(files: File[]) {
@@ -3222,21 +3193,6 @@ async function sendAllMedia() {
               <Info class="h-4 w-4 shrink-0 mt-0.5" />
               <span>{{ $t('chat.videoTooLargeForChat') }}</span>
             </div>
-
-            <!-- Optional client-side video optimizer -->
-            <Button
-              v-if="canOptimizeVideo(activeMedia.file) && activeMedia.file.size > 15.5 * 1024 * 1024"
-              type="button"
-              variant="outline"
-              size="sm"
-              class="w-full text-xs h-8 border-dashed"
-              :disabled="isOptimizingVideo"
-              @click="handleOptimizeVideo(activeMedia)"
-            >
-              <Loader2 v-if="isOptimizingVideo" class="mr-1.5 h-3.5 w-3.5 animate-spin" />
-              <Sparkles v-else class="mr-1.5 h-3.5 w-3.5 text-primary" />
-              {{ isOptimizingVideo ? $t('chat.optimizingVideo') : $t('chat.optimizeVideo') }}
-            </Button>
           </div>
 
           <!-- Caption input (per file, not for audio) -->
