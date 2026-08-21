@@ -91,6 +91,7 @@ func (m *Manager) runIVRFlow(session *CallSession, waAccount *whatsapp.Account) 
 			session.DTMFBuffer = make(chan byte, 32)
 		}
 		session.BridgeStarted = make(chan struct{})
+		session.ConsumerDone = make(chan struct{})
 		session.mu.Unlock()
 		if waRemote != nil {
 			go m.consumeAudioWithDTMF(session, waRemote)

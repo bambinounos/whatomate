@@ -67,6 +67,7 @@ func (m *Manager) InitiateOutgoingCall(
 		TargetPhone:    contactPhone,
 		SDPAnswerReady: make(chan string, 1),
 		BridgeStarted:  make(chan struct{}),
+		ConsumerDone:   make(chan struct{}),
 	}
 
 	// 4. Capture agent's remote track
@@ -562,7 +563,18 @@ func (m *Manager) startOutgoingBridge(
 	waLocal *webrtc.TrackLocalStaticRTP,
 ) {
 	// Signal that bridge is taking over
+	session.mu.Lock()
 	safeClose(session.BridgeStarted)
+	consumerDone := session.ConsumerDone
+	session.mu.Unlock()
+
+	// Wait briefly for pre-bridge consumer to finish its current read and exit cleanly (max 100ms)
+	if consumerDone != nil {
+		select {
+		case <-consumerDone:
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 
 	bridge := m.setupAudioBridge(session)
 

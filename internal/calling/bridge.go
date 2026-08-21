@@ -2,6 +2,7 @@ package calling
 
 import (
 	"sync"
+	"time"
 
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
@@ -151,6 +152,7 @@ func (b *AudioBridge) AttachCaller(callerRemote *webrtc.TrackRemote, agentLocal 
 // high-water mark so the receiver doesn't discard them as old.
 func (b *AudioBridge) forward(src *webrtc.TrackRemote, dst *webrtc.TrackLocalStaticRTP, rec *CallRecorder, trackSeq bool) {
 	buf := make([]byte, 1500)
+	consecutiveErrors := 0
 	for {
 		select {
 		case <-b.stop:
@@ -160,8 +162,19 @@ func (b *AudioBridge) forward(src *webrtc.TrackRemote, dst *webrtc.TrackLocalSta
 
 		n, _, err := src.Read(buf)
 		if err != nil {
-			return
+			select {
+			case <-b.stop:
+				return
+			default:
+			}
+			consecutiveErrors++
+			if consecutiveErrors > 15 {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+			continue
 		}
+		consecutiveErrors = 0
 
 		// Rewrite seq/ts for agent→caller direction when seeded
 		if trackSeq && b.firstAgentSeq {
@@ -185,7 +198,11 @@ func (b *AudioBridge) forward(src *webrtc.TrackRemote, dst *webrtc.TrackLocalSta
 				rewritten, err := pkt.Marshal()
 				if err == nil {
 					if _, err := dst.Write(rewritten); err != nil {
-						return
+						select {
+						case <-b.stop:
+							return
+						default:
+						}
 					}
 				}
 
@@ -197,7 +214,11 @@ func (b *AudioBridge) forward(src *webrtc.TrackRemote, dst *webrtc.TrackLocalSta
 		}
 
 		if _, err := dst.Write(buf[:n]); err != nil {
-			return
+			select {
+			case <-b.stop:
+				return
+			default:
+			}
 		}
 
 		// Parse packet for recording and/or seq tracking.

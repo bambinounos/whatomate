@@ -329,6 +329,15 @@ func (m *Manager) createPeerConnection() (*webrtc.PeerConnection, error) {
 // consumeAudioTrack reads and discards RTP packets to keep the stream active.
 // It exits when the bridge takes over (BridgeStarted channel is closed) or on error.
 func (m *Manager) consumeAudioTrack(session *CallSession, track *webrtc.TrackRemote) {
+	session.mu.Lock()
+	doneChan := session.ConsumerDone
+	session.mu.Unlock()
+	defer func() {
+		if doneChan != nil {
+			safeClose(doneChan)
+		}
+	}()
+
 	buf := make([]byte, 1500)
 	for {
 		select {
@@ -351,6 +360,15 @@ func (m *Manager) consumeAudioTrack(session *CallSession, track *webrtc.TrackRem
 // In pion v4, a new OnTrack may fire for telephone-event, but we also
 // handle the case where DTMF arrives on the same track.
 func (m *Manager) consumeAudioWithDTMF(session *CallSession, track *webrtc.TrackRemote) {
+	session.mu.Lock()
+	doneChan := session.ConsumerDone
+	session.mu.Unlock()
+	defer func() {
+		if doneChan != nil {
+			safeClose(doneChan)
+		}
+	}()
+
 	audioPT := track.PayloadType()
 	var lastDTMFEvent byte = 0xFF
 	var lastEndBit bool

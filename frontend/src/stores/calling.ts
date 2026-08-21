@@ -35,6 +35,39 @@ export const useCallingStore = defineStore('calling', () => {
   // doesn't garbage-collect it mid-call — otherwise the remote voice goes silent.
   let remoteAudioEl: HTMLAudioElement | null = null
 
+  function ensureRemoteAudio(): HTMLAudioElement {
+    if (!remoteAudioEl) {
+      remoteAudioEl = new Audio()
+      remoteAudioEl.autoplay = true
+      ;(remoteAudioEl as any).playsInline = true
+    }
+    return remoteAudioEl
+  }
+
+  function playRemoteAudio(pc: RTCPeerConnection, stream: MediaStream) {
+    if (peerConnection.value !== pc) return
+    const el = ensureRemoteAudio()
+    el.srcObject = stream
+    const playPromise = el.play()
+    if (playPromise !== undefined) {
+      playPromise.catch((err) => {
+        console.warn('[Calling] Remote audio autoplay blocked by browser policy:', err)
+        // If the browser blocked unmuted autoplay, resume immediately on the next user interaction
+        const unlock = () => {
+          if (remoteAudioEl && peerConnection.value === pc) {
+            remoteAudioEl.play().catch(() => {})
+          }
+          window.removeEventListener('click', unlock)
+          window.removeEventListener('touchstart', unlock)
+          window.removeEventListener('keydown', unlock)
+        }
+        window.addEventListener('click', unlock, { once: true })
+        window.addEventListener('touchstart', unlock, { once: true })
+        window.addEventListener('keydown', unlock, { once: true })
+      })
+    }
+  }
+
   // Call permission state (in-memory only, cleared on refresh)
   const callPermissions = reactive(new Map<string, { status: string, expiresAt?: string }>())
 
@@ -179,6 +212,9 @@ export const useCallingStore = defineStore('calling', () => {
   }
 
   async function acceptTransfer(id: string) {
+    // Pre-initialize remote audio element synchronously during user gesture
+    ensureRemoteAudio()
+
     // Snapshot the transfer before the API call — the server broadcasts
     // call_transfer_connected immediately which removes it from waitingTransfers
     // via the WebSocket handler before this function completes.
@@ -207,13 +243,7 @@ export const useCallingStore = defineStore('calling', () => {
 
     // Handle remote audio (caller's voice)
     pc.ontrack = (event) => {
-      // A queued ontrack can still fire after cleanup() tore this call down
-      // (or after a new call replaced the connection); recreating the audio
-      // element here would leak it and play ghost audio from a dead stream.
-      if (peerConnection.value !== pc) return
-      if (!remoteAudioEl) remoteAudioEl = new Audio()
-      remoteAudioEl.srcObject = event.streams[0]
-      remoteAudioEl.play().catch(() => { /* ignore autoplay */ })
+      playRemoteAudio(pc, event.streams[0])
     }
 
     // Clean up when WebRTC connection drops
@@ -274,6 +304,9 @@ export const useCallingStore = defineStore('calling', () => {
 
   // Outgoing call actions
   async function makeOutgoingCall(contactId: string, contactName: string, whatsappAccount: string) {
+    // Pre-initialize remote audio element synchronously during user gesture
+    ensureRemoteAudio()
+
     // Get microphone access
     let stream: MediaStream
     try {
@@ -296,12 +329,7 @@ export const useCallingStore = defineStore('calling', () => {
 
     // Handle remote audio (consumer's voice)
     pc.ontrack = (event) => {
-      // Same late-ontrack guard as in acceptTransfer: never re-create
-      // the audio element for a connection that is no longer the active one.
-      if (peerConnection.value !== pc) return
-      if (!remoteAudioEl) remoteAudioEl = new Audio()
-      remoteAudioEl.srcObject = event.streams[0]
-      remoteAudioEl.play().catch(() => { /* ignore autoplay */ })
+      playRemoteAudio(pc, event.streams[0])
     }
 
     // Clean up when WebRTC connection drops

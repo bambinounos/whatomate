@@ -58,6 +58,7 @@ type CallSession struct {
 	HoldPlayer        *AudioPlayer
 	TransferCancel    context.CancelFunc
 	BridgeStarted     chan struct{} // closed when bridge takes over caller track
+	ConsumerDone      chan struct{} // closed when consumeAudioTrack or consumeAudioWithDTMF exits
 	TransferAccepted  chan struct{} // closed when an agent accepts the transfer (rotation signal)
 	TransferDone      chan string   // outcome sent when transfer ends; nil = terminal
 	LastRTPSeq        uint16        // last RTP seq from bridge, for post-transfer player
@@ -200,6 +201,7 @@ func (m *Manager) HandleIncomingCall(account *models.WhatsAppAccount, contact *m
 		DTMFBuffer:     make(chan byte, 32),
 		StartedAt:      time.Now(),
 		BridgeStarted:  make(chan struct{}),
+		ConsumerDone:   make(chan struct{}),
 		StickyAgentID:  stickyAgentID,
 	}
 

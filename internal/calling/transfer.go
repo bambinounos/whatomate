@@ -281,6 +281,7 @@ func (m *Manager) InitiateAgentTransfer(callLogID, initiatingAgentID uuid.UUID, 
 	session.TransferID = uuid.Nil
 	session.TransferStatus = models.CallTransferStatusWaiting
 	session.BridgeStarted = make(chan struct{})
+	session.ConsumerDone = make(chan struct{})
 	session.mu.Unlock()
 
 	// Stop bridge and close old agent PC outside lock.
@@ -642,7 +643,16 @@ func (m *Manager) completeTransferConnection(session *CallSession, transferID, a
 	// Signal that bridge is taking over the caller track
 	session.mu.Lock()
 	safeClose(session.BridgeStarted)
+	consumerDone := session.ConsumerDone
 	session.mu.Unlock()
+
+	// Wait briefly for pre-bridge consumer to finish its current read and exit cleanly (max 100ms)
+	if consumerDone != nil {
+		select {
+		case <-consumerDone:
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 
 	// The caller's track may have landed between the snapshot above and the
 	// session.Bridge assignment in setupAudioBridge: OnTrack saw a nil bridge
@@ -805,6 +815,7 @@ func (m *Manager) EndTransfer(transferID uuid.UUID) {
 		// post-transfer IVR nodes (menu, gather) can receive DTMF.
 		session.mu.Lock()
 		session.BridgeStarted = make(chan struct{})
+		session.ConsumerDone = make(chan struct{})
 		callerRemote := session.CallerRemoteTrack
 		session.mu.Unlock()
 		if callerRemote != nil {
@@ -1075,6 +1086,7 @@ func (m *Manager) handleTransferNoAnswer(session *CallSession, transferID uuid.U
 		// post-transfer IVR nodes.
 		session.mu.Lock()
 		session.BridgeStarted = make(chan struct{})
+		session.ConsumerDone = make(chan struct{})
 		callerRemote := session.CallerRemoteTrack
 		session.mu.Unlock()
 		if callerRemote != nil {
@@ -1317,6 +1329,7 @@ func (m *Manager) HoldCall(callLogID uuid.UUID) error {
 	bridge := session.Bridge
 	session.Bridge = nil
 	session.BridgeStarted = make(chan struct{})
+	session.ConsumerDone = make(chan struct{})
 	session.mu.Unlock()
 
 	// Stop bridge and wait for goroutines to finish so lastCallerSeq is final
@@ -1412,7 +1425,16 @@ func (m *Manager) ResumeCall(callLogID uuid.UUID) error {
 	// Signal BridgeStarted so consumeAudioTrack goroutines exit
 	session.mu.Lock()
 	safeClose(session.BridgeStarted)
+	consumerDone := session.ConsumerDone
 	session.mu.Unlock()
+
+	// Wait briefly for pre-bridge consumer to finish its current read and exit cleanly (max 100ms)
+	if consumerDone != nil {
+		select {
+		case <-consumerDone:
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 
 	// Same snapshot/assignment gap as in completeTransferConnection: pick up
 	// a caller track that landed while session.Bridge was still nil.
