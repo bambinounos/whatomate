@@ -1681,15 +1681,17 @@ function isAllowedMediaType(file: File): boolean {
 
 // Per-type client size cap, applied AFTER compression:
 // - Images: Meta's hard 5 MB limit (downscaled/recompressed to <4.5 MB by imageCompression.ts).
-// - Audio / Inline Video: Meta's hard 16 MB limit (15.5 MB safety threshold).
-// - Documents (including large videos sent as document): Meta's official 100 MB limit.
+// - Audio: Meta's hard 16 MB limit (15.5 MB safety threshold).
+// - Videos: Up to 100 MB (server automatically transcodes/compresses with FFmpeg to fit WhatsApp's 16 MB video limit).
+// - Documents: Meta's official 100 MB limit.
 function mediaSizeLimit(type: string): number {
   switch (type) {
     case 'image':
       return 5 * 1024 * 1024
     case 'audio':
-    case 'video':
       return 15.5 * 1024 * 1024
+    case 'video':
+      return 100 * 1024 * 1024
     default:
       return 100 * 1024 * 1024
   }
@@ -1719,18 +1721,9 @@ async function enqueueFiles(files: File[]) {
           file = raw
         }
       }
-      let type = getMediaType(file.type) as QueuedMedia['type']
+      const type = getMediaType(file.type) as QueuedMedia['type']
 
-      // Meta WhatsApp Cloud API limits native inline videos to 16 MB.
-      // If a video is > 15.5 MB (and up to 100 MB), automatically enqueue it as
-      // 'document' so it sends reliably with original quality.
-      if (type === 'video' && file.size > 15.5 * 1024 * 1024) {
-        if (file.size <= 100 * 1024 * 1024) {
-          type = 'document'
-        }
-      }
-
-      const limit = type === 'document' ? 100 * 1024 * 1024 : mediaSizeLimit(type)
+      const limit = mediaSizeLimit(type)
       if (file.size > limit) {
         toast.error(t('chat.fileTooLarge'), {
           description: file.size > 100 * 1024 * 1024
@@ -3164,8 +3157,6 @@ async function sendAllMedia() {
                   variant="ghost"
                   class="h-7 px-2.5 text-xs rounded-md"
                   :class="activeMedia.type === 'video' ? 'bg-primary/20 text-primary font-medium' : 'text-muted-foreground'"
-                  :disabled="activeMedia.file.size > 15.5 * 1024 * 1024"
-                  :title="activeMedia.file.size > 15.5 * 1024 * 1024 ? $t('chat.videoTooLargeForChat') : ''"
                   @click="activeMedia.type = 'video'"
                 >
                   <Film class="h-3.5 w-3.5 mr-1" />
@@ -3185,13 +3176,13 @@ async function sendAllMedia() {
               </div>
             </div>
 
-            <!-- Notice when video > 16 MB is routed to document -->
+            <!-- Notice when video is large -->
             <div
-              v-if="activeMedia.file.size > 15.5 * 1024 * 1024 && activeMedia.type === 'document'"
-              class="text-xs text-amber-400/90 bg-amber-500/10 border border-amber-500/20 rounded-md p-2 flex items-start gap-2"
+              v-if="activeMedia.file.size > 15.5 * 1024 * 1024 && activeMedia.type === 'video'"
+              class="text-xs text-blue-400/90 bg-blue-500/10 border border-blue-500/20 rounded-md p-2 flex items-start gap-2"
             >
               <Info class="h-4 w-4 shrink-0 mt-0.5" />
-              <span>{{ $t('chat.videoTooLargeForChat') }}</span>
+              <span>{{ $t('chat.videoAutoOptimized') }}</span>
             </div>
           </div>
 
