@@ -31,12 +31,34 @@ export const useCallingStore = defineStore('calling', () => {
   const callDuration = ref(0)
   const isMuted = ref(false)
   let durationTimer: number | null = null
-  // Remote (caller/consumer) audio element. Held on a stable ref so the browser
+  // Web Audio API context and source for guaranteed playback on all browsers (immune to 5s autoplay timeout)
+  let audioContext: AudioContext | null = null
+  let audioSourceNode: MediaStreamAudioSourceNode | null = null
+
+  // Remote (caller/consumer) audio element fallback. Held on a stable ref so the browser
   // doesn't garbage-collect it mid-call — otherwise the remote voice goes silent.
   let remoteAudioEl: HTMLAudioElement | null = null
 
-  // A tiny 1-sample silent WAV data URI to unlock audio playback synchronously during user gesture
-  const SILENT_AUDIO_URI = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='
+  function getAudioContext(): AudioContext {
+    if (!audioContext || audioContext.state === 'closed') {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext
+      audioContext = new AudioCtx()
+    }
+    return audioContext
+  }
+
+  // Prime AudioContext and HTMLAudio synchronously during user gesture (click to answer or call)
+  function primeAudio() {
+    try {
+      const ctx = getAudioContext()
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {})
+      }
+    } catch (e) {
+      console.warn('[Calling] AudioContext prime error:', e)
+    }
+    ensureRemoteAudio()
+  }
 
   function ensureRemoteAudio(): HTMLAudioElement {
     if (!remoteAudioEl) {
@@ -47,39 +69,34 @@ export const useCallingStore = defineStore('calling', () => {
     return remoteAudioEl
   }
 
-  // Prime the audio element synchronously during user gesture (click to answer or call)
-  function primeRemoteAudio(): HTMLAudioElement {
-    const el = ensureRemoteAudio()
-    if (!el.srcObject && !el.src) {
-      el.src = SILENT_AUDIO_URI
-      el.play().catch(() => {})
-    }
-    return el
-  }
-
   function playRemoteAudio(pc: RTCPeerConnection, stream: MediaStream) {
     if (peerConnection.value !== pc) return
+
+    // 1. Pipe audio through Web Audio API (immune to 5s user gesture timeout)
+    try {
+      const ctx = getAudioContext()
+      if (ctx.state === 'suspended') {
+        ctx.resume().catch(() => {})
+      }
+      if (audioSourceNode) {
+        try { audioSourceNode.disconnect() } catch {}
+        audioSourceNode = null
+      }
+      audioSourceNode = ctx.createMediaStreamSource(stream)
+      audioSourceNode.connect(ctx.destination)
+    } catch (err) {
+      console.warn('[Calling] Web Audio API routing warning:', err)
+    }
+
+    // 2. Also attach to HTMLAudioElement (standard fallback, without resetting src)
     const el = ensureRemoteAudio()
     if (el.srcObject !== stream) {
-      el.src = ''
       el.srcObject = stream
     }
     const playPromise = el.play()
     if (playPromise !== undefined) {
       playPromise.catch((err) => {
-        console.warn('[Calling] Remote audio autoplay blocked by browser policy:', err)
-        // If the browser blocked unmuted autoplay, resume immediately on the next user interaction
-        const unlock = () => {
-          if (remoteAudioEl && peerConnection.value === pc) {
-            remoteAudioEl.play().catch(() => {})
-          }
-          window.removeEventListener('click', unlock)
-          window.removeEventListener('touchstart', unlock)
-          window.removeEventListener('keydown', unlock)
-        }
-        window.addEventListener('click', unlock, { once: true })
-        window.addEventListener('touchstart', unlock, { once: true })
-        window.addEventListener('keydown', unlock, { once: true })
+        console.warn('[Calling] Remote audio element play blocked (handled by Web Audio):', err)
       })
     }
   }
@@ -88,11 +105,14 @@ export const useCallingStore = defineStore('calling', () => {
   const callPermissions = reactive(new Map<string, { status: string, expiresAt?: string }>())
 
   // Ring the agent's softphone continuously while one or more incoming call
-  // transfers are waiting to be answered; stop as soon as the queue clears
-  // (accepted, taken by another agent, abandoned, no-answer, or completed).
-  watch(() => waitingTransfers.value.length, (count) => {
-    if (count > 0) startRingtone()
-    else stopRingtone()
+  // transfers are waiting to be answered, BUT only when the agent is NOT already on a call.
+  // Stop as soon as the queue clears or the agent enters an active call.
+  watch([() => waitingTransfers.value.length, isOnCall], ([count, onCall]) => {
+    if (count > 0 && !onCall) {
+      startRingtone()
+    } else {
+      stopRingtone()
+    }
   })
 
   // Outgoing call state
@@ -228,8 +248,9 @@ export const useCallingStore = defineStore('calling', () => {
   }
 
   async function acceptTransfer(id: string) {
-    // Pre-initialize and prime remote audio element synchronously during user gesture
-    primeRemoteAudio()
+    // Pre-initialize and prime audio synchronously during user gesture
+    primeAudio()
+    stopRingtone()
 
     // Snapshot the transfer before the API call — the server broadcasts
     // call_transfer_connected immediately which removes it from waitingTransfers
@@ -282,13 +303,13 @@ export const useCallingStore = defineStore('calling', () => {
     const offer = await pc.createOffer()
     await pc.setLocalDescription(offer)
 
-    // Wait for ICE gathering (with 3s timeout to avoid long TURN delays)
+    // Wait for ICE gathering (with 1s timeout for rapid connection)
     await new Promise<void>((resolve) => {
       if (pc.iceGatheringState === 'complete') {
         resolve()
         return
       }
-      const timeout = setTimeout(resolve, 3000)
+      const timeout = setTimeout(resolve, 1000)
       pc.onicegatheringstatechange = () => {
         if (pc.iceGatheringState === 'complete') {
           clearTimeout(timeout)
@@ -329,8 +350,9 @@ export const useCallingStore = defineStore('calling', () => {
 
   // Outgoing call actions
   async function makeOutgoingCall(contactId: string, contactName: string, whatsappAccount: string) {
-    // Pre-initialize and prime remote audio element synchronously during user gesture
-    primeRemoteAudio()
+    // Pre-initialize and prime audio synchronously during user gesture
+    primeAudio()
+    stopRingtone()
 
     // Get microphone access and ICE servers in parallel
     let stream: MediaStream
@@ -374,13 +396,13 @@ export const useCallingStore = defineStore('calling', () => {
     const offer = await pc.createOffer()
     await pc.setLocalDescription(offer)
 
-    // Wait for ICE gathering (with 3s timeout to avoid long TURN delays)
+    // Wait for ICE gathering (with 1s timeout for rapid connection)
     await new Promise<void>((resolve) => {
       if (pc.iceGatheringState === 'complete') {
         resolve()
         return
       }
-      const timeout = setTimeout(resolve, 3000)
+      const timeout = setTimeout(resolve, 1000)
       pc.onicegatheringstatechange = () => {
         if (pc.iceGatheringState === 'complete') {
           clearTimeout(timeout)
@@ -485,9 +507,14 @@ export const useCallingStore = defineStore('calling', () => {
   }
 
   function cleanup() {
+    stopRingtone()
     if (durationTimer) {
       clearInterval(durationTimer)
       durationTimer = null
+    }
+    if (audioSourceNode) {
+      try { audioSourceNode.disconnect() } catch {}
+      audioSourceNode = null
     }
     if (peerConnection.value) {
       peerConnection.value.close()
@@ -526,10 +553,14 @@ export const useCallingStore = defineStore('calling', () => {
   function handleCallEvent(type: string, payload: any) {
     switch (type) {
       case 'call_transfer_waiting':
+        // If this agent already accepted this transfer, ignore
+        if (activeTransfer.value?.id === payload.id) break
         // Deduplicate: only add if this transfer ID isn't already in the list
         if (!waitingTransfers.value.some(t => t.id === payload.id)) {
           waitingTransfers.value.push(payload as CallTransfer)
         }
+        // Pre-fetch ICE servers in background so acceptTransfer connects instantly
+        getICEServers().catch(() => {})
         break
       case 'call_transfer_connected':
         // Another agent accepted this transfer — remove from our waiting list
@@ -554,24 +585,32 @@ export const useCallingStore = defineStore('calling', () => {
         }
         break
       case 'call_ended':
-        // If the agent is on a call that just ended, clean up
-        if (isOnCall.value) {
+        // Only clean up if THIS agent is on the call that ended
+        if (isOnCall.value && activeTransfer.value?.whatsapp_call_id === payload.call_id) {
           cleanup()
         }
         fetchCallLogs()
         break
       // Outgoing call events
       case 'outgoing_call_ringing':
-        outgoingCallStatus.value = 'ringing'
+        if (outgoingCallLogId.value === payload.call_log_id || outgoingCallLogId.value === payload.call_id) {
+          outgoingCallStatus.value = 'ringing'
+        }
         break
       case 'outgoing_call_answered':
-        outgoingCallStatus.value = 'answered'
+        if (outgoingCallLogId.value === payload.call_log_id || outgoingCallLogId.value === payload.call_id) {
+          outgoingCallStatus.value = 'answered'
+        }
         break
       case 'outgoing_call_rejected':
-        cleanup()
+        if (outgoingCallLogId.value === payload.call_log_id || outgoingCallLogId.value === payload.call_id) {
+          cleanup()
+        }
         break
       case 'outgoing_call_ended':
-        cleanup()
+        if (outgoingCallLogId.value === payload.call_log_id || outgoingCallLogId.value === payload.call_id) {
+          cleanup()
+        }
         break
       case 'call_permission_update': {
         const t = i18n.global.t
