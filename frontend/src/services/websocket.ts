@@ -43,26 +43,24 @@ function showNotification(title: string, body: string, contactId: string) {
 
 // Show a real OS-level desktop notification (Web Notification API). Fires only
 // when permission is granted and the Whatomate tab/window is NOT focused, so an
-// agent working in another app/window still gets alerted. No service worker is
-// registered, so we use the Notification constructor directly. Falls back
-// silently when unsupported, denied, or the tab is already focused.
-let activeNotification: Notification | null = null
-function showDesktopNotification(title: string, body: string, contactId: string) {
+// agent working in another app/window still gets alerted.
+async function showDesktopNotification(title: string, body: string, contactId: string) {
   if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return
   if (document.visibilityState === 'visible' && document.hasFocus()) return
   try {
-    activeNotification?.close()
     const n = new Notification(title, { body, icon: '/favicon.svg', tag: `chat-${contactId}` })
     n.onclick = () => {
       window.focus()
       router.push(`/chat/${contactId}`)
       n.close()
     }
-    activeNotification = n
   } catch {
     // Some browsers throw when constructing Notification without a service worker; ignore.
   }
 }
+
+// Track unassigned message alert timestamps per contact to prevent notification storms
+const unassignedAlertTimestamps = new Map<string, number>()
 
 // WebSocket message types
 const WS_TYPE_AUTH = 'auth'
@@ -355,8 +353,24 @@ class WebSocketService {
       const settings = authStore.userSettings
 
       const isAssignedToUser = payload.assigned_user_id === currentUserId
-      const isUnassigned = !payload.assigned_user_id // "" or undefined => queue
-      const shouldAlert = isAssignedToUser || isUnassigned
+
+      // Security: Only alert on unassigned messages if the user has permission
+      // to view both chats and contacts. Roles lacking chat/contacts access
+      // (billing, analytics) or agents restricted to assigned chats are not alerted.
+      const canAccessUnassigned = authStore.hasPermission('chat', 'read') && authStore.hasPermission('contacts', 'read')
+      const isUnassigned = !payload.assigned_user_id && canAccessUnassigned
+
+      // Throttle unassigned alerts per contact (at most once every 60s)
+      // to prevent alert storms from chatbot exchanges or burst messages.
+      let shouldAlert = isAssignedToUser
+      if (isUnassigned) {
+        const now = Date.now()
+        const lastAlert = unassignedAlertTimestamps.get(payload.contact_id) || 0
+        if (now - lastAlert > 60_000) {
+          unassignedAlertTimestamps.set(payload.contact_id, now)
+          shouldAlert = true
+        }
+      }
 
       // Check if new message alerts are enabled (default to true if not set)
       const alertsEnabled = settings.new_message_alerts !== false
