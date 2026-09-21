@@ -357,13 +357,20 @@ func (m *Manager) consumeAudioTrack(session *CallSession, track *webrtc.TrackRem
 // consumeAudioWithDTMF reads RTP packets from the audio track, detecting
 // inline telephone-event (DTMF) packets that share the same m-line.
 // WhatsApp sends both Opus audio and telephone-event on a single track.
-// In pion v4, a new OnTrack may fire for telephone-event, but we also
-// handle the case where DTMF arrives on the same track.
+// consumeAudioWithDTMF reads RTP packets from the audio track, detecting
+// inline telephone-event (DTMF) packets that share the same m-line.
+// WhatsApp sends both Opus audio and telephone-event on a single track.
+// When an agent transfer connects, it seamlessly forwards audio RTP packets
+// to session.AgentAudioTrack without restarting or handing off the Pion reader.
 func (m *Manager) consumeAudioWithDTMF(session *CallSession, track *webrtc.TrackRemote) {
 	session.mu.Lock()
+	session.CallerConsumerRunning = true
 	doneChan := session.ConsumerDone
 	session.mu.Unlock()
 	defer func() {
+		session.mu.Lock()
+		session.CallerConsumerRunning = false
+		session.mu.Unlock()
 		if doneChan != nil {
 			safeClose(doneChan)
 		}
@@ -374,18 +381,12 @@ func (m *Manager) consumeAudioWithDTMF(session *CallSession, track *webrtc.Track
 	var lastEndBit bool
 	packetCount := 0
 
-	m.log.Info("Consuming audio with inline DTMF detection",
+	m.log.Info("Consuming audio with inline DTMF detection and transfer forwarding",
 		"call_id", session.ID,
 		"audio_pt", audioPT,
 	)
 
 	for {
-		select {
-		case <-session.BridgeStarted:
-			return
-		default:
-		}
-
 		pkt, _, err := track.ReadRTP()
 		if err != nil {
 			m.log.Debug("Audio track read ended", "call_id", session.ID, "error", err)
@@ -394,16 +395,8 @@ func (m *Manager) consumeAudioWithDTMF(session *CallSession, track *webrtc.Track
 
 		packetCount++
 
-		// Log every 500th packet and any non-audio packet for debugging
+		// Check if this is a telephone-event DTMF packet
 		if pkt.PayloadType != uint8(audioPT) {
-			m.log.Info("Non-audio RTP packet received",
-				"call_id", session.ID,
-				"payload_type", pkt.PayloadType,
-				"payload_len", len(pkt.Payload),
-				"audio_pt", audioPT,
-			)
-
-			// Telephone-event DTMF payload is 4 bytes
 			if len(pkt.Payload) >= 4 {
 				eventID := pkt.Payload[0]
 				endBit := (pkt.Payload[1] & 0x80) != 0
@@ -417,11 +410,23 @@ func (m *Manager) consumeAudioWithDTMF(session *CallSession, track *webrtc.Track
 					sendDTMFDigit(session, digit, m.log)
 				}
 			}
-		} else if packetCount == 1 {
-			m.log.Debug("First audio packet received",
-				"call_id", session.ID,
-				"payload_type", pkt.PayloadType,
-			)
+			continue
+		}
+
+		// Forward audio packet to agent if transfer is connected
+		session.mu.Lock()
+		agentLocal := session.AgentAudioTrack
+		bridge := session.Bridge
+		status := session.TransferStatus
+		session.mu.Unlock()
+
+		if status == models.CallTransferStatusConnected && agentLocal != nil {
+			if err := agentLocal.WriteRTP(pkt); err != nil {
+				m.log.Debug("Failed to forward caller RTP to agent", "call_id", session.ID, "error", err)
+			}
+			if bridge != nil && bridge.callerRec != nil && len(pkt.Payload) > 0 {
+				bridge.callerRec.WritePacket(pkt.Payload)
+			}
 		}
 	}
 }

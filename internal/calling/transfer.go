@@ -640,19 +640,15 @@ func (m *Manager) completeTransferConnection(session *CallSession, transferID, a
 		bridge.SeedSequence(holdSeq, holdTS)
 	}
 
-	// Signal that bridge is taking over the caller track
+	// If the caller track is already being read by consumeAudioWithDTMF, tell
+	// the bridge that caller audio is handled so it forwards agent→caller only
+	// and doesn't spawn a competing reader on callerRemote.
 	session.mu.Lock()
-	safeClose(session.BridgeStarted)
-	consumerDone := session.ConsumerDone
-	session.mu.Unlock()
-
-	// Wait briefly for pre-bridge consumer to finish its current read and exit cleanly (max 100ms)
-	if consumerDone != nil {
-		select {
-		case <-consumerDone:
-		case <-time.After(100 * time.Millisecond):
-		}
+	if session.CallerConsumerRunning {
+		bridge.SetCallerHandled(true)
 	}
+	safeClose(session.BridgeStarted)
+	session.mu.Unlock()
 
 	// The caller's track may have landed between the snapshot above and the
 	// session.Bridge assignment in setupAudioBridge: OnTrack saw a nil bridge

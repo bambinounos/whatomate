@@ -64,7 +64,12 @@ async function enableDesktopNotifications() {
     toast.error(t('settings.desktopNotificationsUnsupported'))
     return
   }
-  desktopPerm.value = await Notification.requestPermission()
+  try {
+    const res = await Promise.resolve(Notification.requestPermission())
+    desktopPerm.value = (res as NotificationPermission) || Notification.permission
+  } catch {
+    desktopPerm.value = Notification.permission
+  }
   if (desktopPerm.value === 'granted') {
     new Notification('Whatomate', { body: t('settings.desktopNotificationsEnabled'), icon: '/favicon.svg' })
     // Also subscribe this browser to Web Push (background notifications for

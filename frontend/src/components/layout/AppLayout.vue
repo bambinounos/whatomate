@@ -44,18 +44,11 @@ onMounted(() => {
       }
     })
 
-    // Request desktop-notification permission so agents get OS-level alerts for
-    // new messages even when the Whatomate tab is backgrounded. If a browser
-    // blocks the auto-request (needs a user gesture), Settings exposes an
-    // explicit "Enable desktop notifications" button as a guaranteed path.
-    // Once granted, also subscribe to Web Push so notifications reach the
-    // installed PWA/TWA even with the app fully closed.
-    if (typeof Notification !== 'undefined') {
-      if (Notification.permission === 'default') {
-        Notification.requestPermission().then(() => initPush()).catch(() => {})
-      } else if (Notification.permission === 'granted') {
-        initPush()
-      }
+    // If desktop notification permission has already been granted (via the Settings button),
+    // subscribe to Web Push so notifications reach the installed PWA/TWA even with the app closed.
+    // Unprompted permission requests on load are deliberately avoided to prevent browser auto-blocking.
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      initPush()
     }
   }
 })

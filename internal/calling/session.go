@@ -59,6 +59,7 @@ type CallSession struct {
 	TransferCancel    context.CancelFunc
 	BridgeStarted     chan struct{} // closed when bridge takes over caller track
 	ConsumerDone      chan struct{} // closed when consumeAudioTrack or consumeAudioWithDTMF exits
+	CallerConsumerRunning bool      // true while consumeAudioWithDTMF is actively reading callerRemote
 	TransferAccepted  chan struct{} // closed when an agent accepts the transfer (rotation signal)
 	TransferDone      chan string   // outcome sent when transfer ends; nil = terminal
 	LastRTPSeq        uint16        // last RTP seq from bridge, for post-transfer player

@@ -39,7 +39,17 @@ type AudioBridge struct {
 	mu             sync.Mutex
 	stopped        bool
 	callerAttached bool
+	callerHandled  bool
 	callerSlot     chan callerLeg
+}
+
+// SetCallerHandled informs the bridge that caller audio is already being
+// forwarded by the active consumer loop (e.g. consumeAudioWithDTMF) so Start()
+// will not spawn a competing reader on callerRemote.
+func (b *AudioBridge) SetCallerHandled(handled bool) {
+	b.mu.Lock()
+	b.callerHandled = handled
+	b.mu.Unlock()
 }
 
 // callerLeg is a late caller→agent forwarding request delivered to the slot
@@ -79,30 +89,38 @@ func (b *AudioBridge) Start(
 	callerRemote *webrtc.TrackRemote, agentLocal *webrtc.TrackLocalStaticRTP,
 	agentRemote *webrtc.TrackRemote, callerLocal *webrtc.TrackLocalStaticRTP,
 ) {
+	b.mu.Lock()
+	callerHandled := b.callerHandled
+	b.mu.Unlock()
+
 	// Caller audio → Agent speaker (record caller's voice)
-	if callerRemote != nil && agentLocal != nil {
-		b.mu.Lock()
-		b.callerAttached = true
-		b.mu.Unlock()
-		b.wg.Add(1)
-		go func() {
-			defer b.wg.Done()
-			b.forward(callerRemote, agentLocal, b.callerRec, false)
-		}()
-	} else {
-		// Reserve the caller slot: on incoming calls the caller's track often
-		// arrives only after the agent answers. Holding a WaitGroup slot here
-		// means AttachCaller never races Start's wg.Wait, even if the agent
-		// leg exits first.
-		b.wg.Add(1)
-		go func() {
-			defer b.wg.Done()
-			select {
-			case <-b.stop:
-			case leg := <-b.callerSlot:
-				b.forward(leg.src, leg.dst, b.callerRec, false)
-			}
-		}()
+	// Skipped when callerHandled is true: the session's active RTP loop is already
+	// forwarding caller packets directly to agentLocal without reader collision.
+	if !callerHandled {
+		if callerRemote != nil && agentLocal != nil {
+			b.mu.Lock()
+			b.callerAttached = true
+			b.mu.Unlock()
+			b.wg.Add(1)
+			go func() {
+				defer b.wg.Done()
+				b.forward(callerRemote, agentLocal, b.callerRec, false)
+			}()
+		} else {
+			// Reserve the caller slot: on incoming calls the caller's track often
+			// arrives only after the agent answers. Holding a WaitGroup slot here
+			// means AttachCaller never races Start's wg.Wait, even if the agent
+			// leg exits first.
+			b.wg.Add(1)
+			go func() {
+				defer b.wg.Done()
+				select {
+				case <-b.stop:
+				case leg := <-b.callerSlot:
+					b.forward(leg.src, leg.dst, b.callerRec, false)
+				}
+			}()
+		}
 	}
 
 	// Agent mic → Caller speaker (record agent's voice, track seq/ts)
@@ -167,11 +185,22 @@ func (b *AudioBridge) forward(src *webrtc.TrackRemote, dst *webrtc.TrackLocalSta
 				return
 			default:
 			}
-			consecutiveErrors++
-			if consecutiveErrors > 15 {
+			b.mu.Lock()
+			stopped := b.stopped
+			b.mu.Unlock()
+			if stopped {
 				return
 			}
-			time.Sleep(10 * time.Millisecond)
+			consecutiveErrors++
+			if consecutiveErrors > 100 { // Only exit after 5s of persistent errors if stopped
+				b.mu.Lock()
+				stopped = b.stopped
+				b.mu.Unlock()
+				if stopped {
+					return
+				}
+			}
+			time.Sleep(50 * time.Millisecond)
 			continue
 		}
 		consecutiveErrors = 0

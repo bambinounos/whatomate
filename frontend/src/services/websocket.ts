@@ -52,7 +52,6 @@ function showNotification(title: string, body: string, contactId: string) {
 // Falls back to the constructor when there's no registration (push disabled)
 // or the SW call fails, and silently when unsupported, denied, or the tab is
 // already focused.
-let activeNotification: Notification | null = null
 async function showDesktopNotification(title: string, body: string, contactId: string) {
   if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return
   if (document.visibilityState === 'visible' && document.hasFocus()) return
@@ -74,18 +73,19 @@ async function showDesktopNotification(title: string, body: string, contactId: s
   }
 
   try {
-    activeNotification?.close()
     const n = new Notification(title, { body, icon: '/favicon.svg', tag: `chat-${contactId}` })
     n.onclick = () => {
       window.focus()
       router.push(`/chat/${contactId}`)
       n.close()
     }
-    activeNotification = n
   } catch {
     // Some browsers throw when constructing Notification without a service worker; ignore.
   }
 }
+
+// Track unassigned message alert timestamps per contact to prevent notification storms
+const unassignedAlertTimestamps = new Map<string, number>()
 
 // WebSocket message types
 const WS_TYPE_AUTH = 'auth'
@@ -359,18 +359,33 @@ class WebSocketService {
 
     // Alert (sound + in-app toast + OS desktop notification) for incoming
     // messages when the agent isn't already viewing this chat. Alerts fire for
-    // messages assigned to THIS agent OR unassigned/queue messages — so nothing
-    // is missed when vendors aren't watching the chat (incl. media-only first
-    // messages). Messages assigned to a DIFFERENT agent stay silent. Respects
-    // the user's new_message_alerts setting.
+    // messages assigned to THIS agent, or unassigned/queue messages for users with
+    // chat+contacts access (rate-limited to avoid bot/burst alert storms).
+    // Messages assigned to a DIFFERENT agent stay silent. Respects new_message_alerts.
     if (payload.direction === 'incoming' && !isViewingThisContact) {
       const authStore = useAuthStore()
       const currentUserId = authStore.user?.id
       const settings = authStore.userSettings
 
       const isAssignedToUser = payload.assigned_user_id === currentUserId
-      const isUnassigned = !payload.assigned_user_id // "" or undefined => queue
-      const shouldAlert = isAssignedToUser || isUnassigned
+
+      // Security: Only alert on unassigned messages if the user has permission
+      // to view both chats and contacts. Roles lacking chat/contacts access
+      // (billing, analytics) or agents restricted to assigned chats are not alerted.
+      const canAccessUnassigned = authStore.hasPermission('chat', 'read') && authStore.hasPermission('contacts', 'read')
+      const isUnassigned = !payload.assigned_user_id && canAccessUnassigned
+
+      // Throttle unassigned alerts per contact (at most once every 60s)
+      // to prevent alert storms from chatbot exchanges or burst messages.
+      let shouldAlert = isAssignedToUser
+      if (isUnassigned) {
+        const now = Date.now()
+        const lastAlert = unassignedAlertTimestamps.get(payload.contact_id) || 0
+        if (now - lastAlert > 60_000) {
+          unassignedAlertTimestamps.set(payload.contact_id, now)
+          shouldAlert = true
+        }
+      }
 
       // Check if new message alerts are enabled (default to true if not set)
       const alertsEnabled = settings.new_message_alerts !== false

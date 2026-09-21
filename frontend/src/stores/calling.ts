@@ -35,6 +35,9 @@ export const useCallingStore = defineStore('calling', () => {
   // doesn't garbage-collect it mid-call — otherwise the remote voice goes silent.
   let remoteAudioEl: HTMLAudioElement | null = null
 
+  // A tiny 1-sample silent WAV data URI to unlock audio playback synchronously during user gesture
+  const SILENT_AUDIO_URI = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='
+
   function ensureRemoteAudio(): HTMLAudioElement {
     if (!remoteAudioEl) {
       remoteAudioEl = new Audio()
@@ -44,10 +47,23 @@ export const useCallingStore = defineStore('calling', () => {
     return remoteAudioEl
   }
 
+  // Prime the audio element synchronously during user gesture (click to answer or call)
+  function primeRemoteAudio(): HTMLAudioElement {
+    const el = ensureRemoteAudio()
+    if (!el.srcObject && !el.src) {
+      el.src = SILENT_AUDIO_URI
+      el.play().catch(() => {})
+    }
+    return el
+  }
+
   function playRemoteAudio(pc: RTCPeerConnection, stream: MediaStream) {
     if (peerConnection.value !== pc) return
     const el = ensureRemoteAudio()
-    el.srcObject = stream
+    if (el.srcObject !== stream) {
+      el.src = ''
+      el.srcObject = stream
+    }
     const playPromise = el.play()
     if (playPromise !== undefined) {
       playPromise.catch((err) => {
@@ -212,8 +228,8 @@ export const useCallingStore = defineStore('calling', () => {
   }
 
   async function acceptTransfer(id: string) {
-    // Pre-initialize remote audio element synchronously during user gesture
-    ensureRemoteAudio()
+    // Pre-initialize and prime remote audio element synchronously during user gesture
+    primeRemoteAudio()
 
     // Snapshot the transfer before the API call — the server broadcasts
     // call_transfer_connected immediately which removes it from waitingTransfers
@@ -221,18 +237,26 @@ export const useCallingStore = defineStore('calling', () => {
     const transfer = waitingTransfers.value.find(t => t.id === id)
     waitingTransfers.value = waitingTransfers.value.filter(t => t.id !== id)
 
-    // Get microphone access
+    // Get microphone access and ICE servers in parallel
     let stream: MediaStream
+    let iceServers: RTCIceServer[]
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-    } catch {
-      throw new Error('Microphone access is required to accept calls')
+      const [userMediaStream, servers] = await Promise.all([
+        navigator.mediaDevices.getUserMedia({ audio: true }),
+        getICEServers()
+      ])
+      stream = userMediaStream
+      iceServers = servers
+    } catch (err: any) {
+      if (!localStream.value && !stream!) {
+        throw new Error('Microphone access is required to accept calls')
+      }
+      throw err
     }
 
     localStream.value = stream
 
     // Create RTCPeerConnection with configured ICE servers
-    const iceServers = await getICEServers()
     const pc = new RTCPeerConnection({ iceServers })
     peerConnection.value = pc
 
@@ -241,9 +265,10 @@ export const useCallingStore = defineStore('calling', () => {
       pc.addTrack(track, stream)
     })
 
-    // Handle remote audio (caller's voice)
+    // Handle remote audio (caller's voice) with track-to-stream fallback
     pc.ontrack = (event) => {
-      playRemoteAudio(pc, event.streams[0])
+      const remoteStream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track])
+      playRemoteAudio(pc, remoteStream)
     }
 
     // Clean up when WebRTC connection drops
@@ -304,13 +329,19 @@ export const useCallingStore = defineStore('calling', () => {
 
   // Outgoing call actions
   async function makeOutgoingCall(contactId: string, contactName: string, whatsappAccount: string) {
-    // Pre-initialize remote audio element synchronously during user gesture
-    ensureRemoteAudio()
+    // Pre-initialize and prime remote audio element synchronously during user gesture
+    primeRemoteAudio()
 
-    // Get microphone access
+    // Get microphone access and ICE servers in parallel
     let stream: MediaStream
+    let iceServers: RTCIceServer[]
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const [userMediaStream, servers] = await Promise.all([
+        navigator.mediaDevices.getUserMedia({ audio: true }),
+        getICEServers()
+      ])
+      stream = userMediaStream
+      iceServers = servers
     } catch {
       throw new Error('Microphone access is required to make calls')
     }
@@ -318,7 +349,6 @@ export const useCallingStore = defineStore('calling', () => {
     localStream.value = stream
 
     // Create RTCPeerConnection with configured ICE servers
-    const iceServers = await getICEServers()
     const pc = new RTCPeerConnection({ iceServers })
     peerConnection.value = pc
 
@@ -327,9 +357,10 @@ export const useCallingStore = defineStore('calling', () => {
       pc.addTrack(track, stream)
     })
 
-    // Handle remote audio (consumer's voice)
+    // Handle remote audio (consumer's voice) with track-to-stream fallback
     pc.ontrack = (event) => {
-      playRemoteAudio(pc, event.streams[0])
+      const remoteStream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track])
+      playRemoteAudio(pc, remoteStream)
     }
 
     // Clean up when WebRTC connection drops
