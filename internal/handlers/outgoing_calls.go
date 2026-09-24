@@ -41,6 +41,7 @@ func (a *App) InitiateOutgoingCall(r *fastglue.Request) error {
 		First(&account).Error; err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "WhatsApp account not found", nil, "")
 	}
+	a.decryptAccountSecrets(&account)
 
 	// Look up contact by ID
 	contactID, parseErr := uuid.Parse(req.ContactID)
@@ -140,6 +141,7 @@ func (a *App) SendCallPermissionRequest(r *fastglue.Request) error {
 		First(&account).Error; err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "WhatsApp account not found", nil, "")
 	}
+	a.decryptAccountSecrets(&account)
 
 	waAccount := account.ToWAAccount()
 
@@ -231,6 +233,7 @@ func (a *App) GetCallPermission(r *fastglue.Request) error {
 	if err := a.DB.Where("organization_id = ? AND name = ?", orgID, accountName).First(&account).Error; err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "WhatsApp account not found", nil, "")
 	}
+	a.decryptAccountSecrets(&account)
 
 	waAccount := account.ToWAAccount()
 
